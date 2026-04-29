@@ -12,8 +12,8 @@ import (
 
 	amf_context "github.com/free5gc/amf/internal/context"
 	"github.com/free5gc/amf/internal/logger"
-	business_metrics "github.com/free5gc/amf/internal/metrics/business"
 	resource_metrics "github.com/free5gc/amf/internal/metrics"
+	business_metrics "github.com/free5gc/amf/internal/metrics/business"
 	"github.com/free5gc/amf/internal/ngap"
 	ngap_autoscale "github.com/free5gc/amf/internal/ngap/autoscale"
 	ngap_message "github.com/free5gc/amf/internal/ngap/message"
@@ -47,11 +47,11 @@ type AmfApp struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	processor              *processor.Processor
-	consumer               *consumer.Consumer
-	sbiServer              *sbi.Server
-	metricsServer          *metrics.Server
-	autoscaleController    *ngap_autoscale.Controller
+	processor           *processor.Processor
+	consumer            *consumer.Consumer
+	sbiServer           *sbi.Server
+	metricsServer       *metrics.Server
+	autoscaleController *ngap_autoscale.Controller
 }
 
 func NewApp(ctx context.Context, cfg *factory.Config, tlsKeyLogPath string) (*AmfApp, error) {
@@ -125,8 +125,8 @@ func getCustomMetrics(cfg *factory.Config) map[utils.MetricTypeEnabled][]prometh
 	business_metrics.EnableUeConnectivityMetrics()
 
 	// Add resource/autoscaling metrics
-	customMetrics[utils.Business] = append(
-		customMetrics[utils.Business],
+	customMetrics[resource_metrics.SUBSYSTEM_NAME_RESOURCE] = append(
+		customMetrics[resource_metrics.SUBSYSTEM_NAME_RESOURCE],
 		resource_metrics.GetResourceMetrics(cfg.GetMetricsNamespace())...)
 
 	return customMetrics
