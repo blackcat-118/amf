@@ -13,7 +13,9 @@ import (
 	amf_context "github.com/free5gc/amf/internal/context"
 	"github.com/free5gc/amf/internal/logger"
 	business_metrics "github.com/free5gc/amf/internal/metrics/business"
+	resource_metrics "github.com/free5gc/amf/internal/metrics"
 	"github.com/free5gc/amf/internal/ngap"
+	ngap_autoscale "github.com/free5gc/amf/internal/ngap/autoscale"
 	ngap_message "github.com/free5gc/amf/internal/ngap/message"
 	ngap_service "github.com/free5gc/amf/internal/ngap/service"
 	"github.com/free5gc/amf/internal/sbi"
@@ -45,10 +47,11 @@ type AmfApp struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	processor     *processor.Processor
-	consumer      *consumer.Consumer
-	sbiServer     *sbi.Server
-	metricsServer *metrics.Server
+	processor              *processor.Processor
+	consumer               *consumer.Consumer
+	sbiServer              *sbi.Server
+	metricsServer          *metrics.Server
+	autoscaleController    *ngap_autoscale.Controller
 }
 
 func NewApp(ctx context.Context, cfg *factory.Config, tlsKeyLogPath string) (*AmfApp, error) {
@@ -120,6 +123,11 @@ func getCustomMetrics(cfg *factory.Config) map[utils.MetricTypeEnabled][]prometh
 		cfg.GetMetricsNamespace())
 
 	business_metrics.EnableUeConnectivityMetrics()
+
+	// Add resource/autoscaling metrics
+	customMetrics[utils.Business] = append(
+		customMetrics[utils.Business],
+		resource_metrics.GetResourceMetrics(cfg.GetMetricsNamespace())...)
 
 	return customMetrics
 }
@@ -216,6 +224,21 @@ func (a *AmfApp) Start() {
 			a.metricsServer.Run(&a.wg)
 		}()
 	}
+
+	// Initialize and start NGAP autoscaling controller
+	scalingCfg := ngap_autoscale.DefaultScalingConfig()
+	scalingCfg.Enabled = a.cfg.IsNgapAutoscaleEnabled()
+	scalingCfg.IntervalSeconds = a.cfg.GetNgapAutoscaleInterval()
+	scalingCfg.MinWorkers = a.cfg.GetNgapAutoscaleMinWorkers()
+	scalingCfg.MaxWorkers = a.cfg.GetNgapAutoscaleMaxWorkers()
+	scalingCfg.MinBufferSize = a.cfg.GetNgapAutoscaleMinBuffer()
+	scalingCfg.MaxBufferSize = a.cfg.GetNgapAutoscaleMaxBuffer()
+	scalingCfg.WorkerCapacity = a.cfg.GetNgapAutoscaleWorkerCapacity()
+	scalingCfg.QueueThreshold = a.cfg.GetNgapAutoscaleQueueThreshold()
+
+	a.autoscaleController = ngap_autoscale.NewController(scalingCfg)
+	a.wg.Add(1)
+	go a.autoscaleController.Run(a.ctx, &a.wg)
 
 	var profile models.NrfNfManagementNfProfile
 	if profileTmp, err1 := a.Consumer().BuildNFInstance(a.Context()); err1 != nil {

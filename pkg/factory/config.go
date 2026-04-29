@@ -109,6 +109,7 @@ type Configuration struct {
 	DefaultUECtxReq        bool              `yaml:"defaultUECtxReq,omitempty" valid:"type(bool),optional"`
 	NgapWorkerPoolSize     int               `yaml:"ngapWorkerPoolSize,omitempty" valid:"type(int),optional"`
 	NgapTaskBufferSize     int               `yaml:"ngapTaskBufferSize,omitempty" valid:"type(int),optional"`
+	NgapAutoscale          *NgapAutoscale    `yaml:"ngapAutoscale,omitempty" valid:"optional"`
 }
 
 type Logger struct {
@@ -634,6 +635,28 @@ func (n *Sctp) validate() (bool, error) {
 	return true, nil
 }
 
+type NgapAutoscale struct {
+	Enabled              bool    `yaml:"enabled,omitempty" valid:"type(bool),optional"`
+	IntervalSeconds      int     `yaml:"intervalSeconds,omitempty" valid:"type(int),optional"`
+	MinWorkers           int     `yaml:"minWorkers,omitempty" valid:"type(int),optional"`
+	MaxWorkers           int     `yaml:"maxWorkers,omitempty" valid:"type(int),optional"`
+	MinBufferSize        int     `yaml:"minBufferSize,omitempty" valid:"type(int),optional"`
+	MaxBufferSize        int     `yaml:"maxBufferSize,omitempty" valid:"type(int),optional"`
+	WorkerCapacity       float64 `yaml:"workerCapacity,omitempty" valid:"type(float64),optional"`
+	QueueThreshold       float64 `yaml:"queueThreshold,omitempty" valid:"type(float64),optional"`
+	LowLoadThreshold     float64 `yaml:"lowLoadThreshold,omitempty" valid:"type(float64),optional"`
+	LowLoadDurationSec   int     `yaml:"lowLoadDurationSec,omitempty" valid:"type(int),optional"`
+	ScaleUpCooldownSec   int     `yaml:"scaleUpCooldownSec,omitempty" valid:"type(int),optional"`
+	ScaleDownCooldownSec int     `yaml:"scaleDownCooldownSec,omitempty" valid:"type(int),optional"`
+}
+
+func (n *NgapAutoscale) validate() (bool, error) {
+	if _, err := govalidator.ValidateStruct(n); err != nil {
+		return false, appendInvalid(err)
+	}
+	return true, nil
+}
+
 type NasIE struct {
 	NetworkFeatureSupport5GS *NetworkFeatureSupport5GS `yaml:"networkFeatureSupport5GS,omitempty" valid:"optional"`
 }
@@ -1051,4 +1074,76 @@ func (c *Config) GetNgapTaskBufferSize() int {
 		return c.Configuration.NgapTaskBufferSize
 	}
 	return 1000 // Default buffer size
+}
+
+func (c *Config) IsNgapAutoscaleEnabled() bool {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration != nil && c.Configuration.NgapAutoscale != nil {
+		return c.Configuration.NgapAutoscale.Enabled
+	}
+	return true // Enabled by default
+}
+
+func (c *Config) GetNgapAutoscaleInterval() int {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration != nil && c.Configuration.NgapAutoscale != nil && c.Configuration.NgapAutoscale.IntervalSeconds > 0 {
+		return c.Configuration.NgapAutoscale.IntervalSeconds
+	}
+	return 5 // Default 5 seconds
+}
+
+func (c *Config) GetNgapAutoscaleMinWorkers() int {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration != nil && c.Configuration.NgapAutoscale != nil && c.Configuration.NgapAutoscale.MinWorkers > 0 {
+		return c.Configuration.NgapAutoscale.MinWorkers
+	}
+	return 2 // Default minimum
+}
+
+func (c *Config) GetNgapAutoscaleMaxWorkers() int {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration != nil && c.Configuration.NgapAutoscale != nil && c.Configuration.NgapAutoscale.MaxWorkers > 0 {
+		return c.Configuration.NgapAutoscale.MaxWorkers
+	}
+	return 128 // Default maximum
+}
+
+func (c *Config) GetNgapAutoscaleMinBuffer() int {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration != nil && c.Configuration.NgapAutoscale != nil && c.Configuration.NgapAutoscale.MinBufferSize > 0 {
+		return c.Configuration.NgapAutoscale.MinBufferSize
+	}
+	return 256 // Default minimum buffer
+}
+
+func (c *Config) GetNgapAutoscaleMaxBuffer() int {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration != nil && c.Configuration.NgapAutoscale != nil && c.Configuration.NgapAutoscale.MaxBufferSize > 0 {
+		return c.Configuration.NgapAutoscale.MaxBufferSize
+	}
+	return 8192 // Default maximum buffer
+}
+
+func (c *Config) GetNgapAutoscaleWorkerCapacity() float64 {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration != nil && c.Configuration.NgapAutoscale != nil && c.Configuration.NgapAutoscale.WorkerCapacity > 0 {
+		return c.Configuration.NgapAutoscale.WorkerCapacity
+	}
+	return 1000.0 // Default 1000 msgs/sec per worker
+}
+
+func (c *Config) GetNgapAutoscaleQueueThreshold() float64 {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration != nil && c.Configuration.NgapAutoscale != nil && c.Configuration.NgapAutoscale.QueueThreshold > 0 {
+		return c.Configuration.NgapAutoscale.QueueThreshold
+	}
+	return 100.0 // Default queue threshold
 }
