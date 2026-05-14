@@ -23,6 +23,7 @@ type Worker struct {
 	taskChan chan Task
 	stopChan chan struct{} // Signal channel for shutdown
 	stopOnce sync.Once     // Ensures stopChan is closed only once
+	draining bool          // If true, rejects new tasks but processes existing ones
 	handler  func(conn net.Conn, msg []byte)
 	wg       *sync.WaitGroup
 }
@@ -33,6 +34,7 @@ func NewWorker(id int, bufferSize int, handler func(conn net.Conn, msg []byte), 
 		ID:       id,
 		taskChan: make(chan Task, bufferSize),
 		stopChan: make(chan struct{}),
+		draining: false,
 		handler:  handler,
 		wg:       wg,
 	}
@@ -82,8 +84,12 @@ func (w *Worker) drainAndExit() {
 }
 
 // Submit submits a task to this worker's queue.
-// Returns true if the task was successfully queued, false if the worker is stopped.
+// Returns true if the task was successfully queued, false if the worker is stopped or draining.
 func (w *Worker) Submit(task Task) bool {
+	if w.draining {
+		logger.NgapLog.Debugf("Worker %d draining, rejecting task for UE ID %d", w.ID, task.UEID)
+		return false
+	}
 	select {
 	case w.taskChan <- task:
 		// Successfully queued (blocks here if buffer is full, providing backpressure)
@@ -105,7 +111,8 @@ func (w *Worker) Stop() {
 // UEScheduler distributes NGAP tasks to workers based on UE ID.
 type UEScheduler struct {
 	workers        []*Worker
-	numWorkers     int
+	numWorkers     int // Total workers (fixed at 128 for affinity)
+	activeWorkers  int // Currently active workers
 	taskBufferSize int
 	handler        func(conn net.Conn, msg []byte)
 	workerLock     sync.RWMutex
@@ -118,17 +125,26 @@ func NewUEScheduler(numWorkers int, taskBufferSize int, handler func(conn net.Co
 		numWorkers = runtime.NumCPU()
 	}
 
-	logger.NgapLog.Infof("Initializing UE Scheduler with %d workers", numWorkers)
+	const maxWorkers = 128
+	if numWorkers > maxWorkers {
+		numWorkers = maxWorkers
+	}
+
+	logger.NgapLog.Infof("Initializing UE Scheduler with %d active workers (max %d)", numWorkers, maxWorkers)
 
 	scheduler := &UEScheduler{
-		workers:        make([]*Worker, numWorkers),
-		numWorkers:     numWorkers,
+		workers:        make([]*Worker, maxWorkers),
+		numWorkers:     maxWorkers,
+		activeWorkers:  numWorkers,
 		taskBufferSize: taskBufferSize,
 		handler:        handler,
 	}
 
-	for i := 0; i < numWorkers; i++ {
+	for i := 0; i < maxWorkers; i++ {
 		scheduler.workers[i] = NewWorker(i, taskBufferSize, handler, &scheduler.wg)
+		if i >= numWorkers {
+			scheduler.workers[i].draining = true
+		}
 	}
 
 	return scheduler
@@ -147,6 +163,15 @@ func (s *UEScheduler) DispatchTask(task Task) bool {
 	worker := s.workers[workerIndex]
 
 	logger.NgapLog.Debugf("Dispatching UE ID %d to Worker %d (hash-based routing)",
+		task.UEID, workerIndex)
+	if worker.Submit(task) {
+		return true
+	}
+
+	// If worker is draining, reroute to an active worker
+	workerIndex = workerIndex % s.activeWorkers
+	worker = s.workers[workerIndex]
+	logger.NgapLog.Debugf("Rerouting UE ID %d to active Worker %d",
 		task.UEID, workerIndex)
 	return worker.Submit(task)
 }
@@ -219,7 +244,7 @@ func ShutdownScheduler() {
 	}
 }
 
-// GetTotalQueueDepth returns the sum of queued tasks across all workers.
+// GetTotalQueueDepth returns the sum of queued tasks across all active workers.
 func GetTotalQueueDepth() int {
 	schedulerMutex.RLock()
 	defer schedulerMutex.RUnlock()
@@ -229,8 +254,8 @@ func GetTotalQueueDepth() int {
 	}
 
 	total := 0
-	for _, worker := range globalScheduler.workers {
-		total += len(worker.taskChan)
+	for i := 0; i < globalScheduler.activeWorkers; i++ {
+		total += len(globalScheduler.workers[i].taskChan)
 	}
 	return total
 }
@@ -243,7 +268,7 @@ func GetWorkerCount() int {
 	if globalScheduler == nil {
 		return 0
 	}
-	return globalScheduler.numWorkers
+	return globalScheduler.activeWorkers
 }
 
 // GetWorkerQueueDepths returns queue depth for each worker.
@@ -262,23 +287,23 @@ func GetWorkerQueueDepths() map[int]int {
 	return depths
 }
 
-// GetAverageQueueDepth returns the average queue depth across workers.
+// GetAverageQueueDepth returns the average queue depth across active workers.
 func GetAverageQueueDepth() float64 {
 	schedulerMutex.RLock()
 	defer schedulerMutex.RUnlock()
 
-	if globalScheduler == nil || globalScheduler.numWorkers == 0 {
+	if globalScheduler == nil || globalScheduler.activeWorkers == 0 {
 		return 0
 	}
 
 	total := 0
-	for _, worker := range globalScheduler.workers {
-		total += len(worker.taskChan)
+	for i := 0; i < globalScheduler.activeWorkers; i++ {
+		total += len(globalScheduler.workers[i].taskChan)
 	}
-	return float64(total) / float64(globalScheduler.numWorkers)
+	return float64(total) / float64(globalScheduler.activeWorkers)
 }
 
-// GetMaxQueueDepth returns the maximum queue depth among all workers.
+// GetMaxQueueDepth returns the maximum queue depth among all active workers.
 func GetMaxQueueDepth() int {
 	schedulerMutex.RLock()
 	defer schedulerMutex.RUnlock()
@@ -288,8 +313,8 @@ func GetMaxQueueDepth() int {
 	}
 
 	max := 0
-	for _, worker := range globalScheduler.workers {
-		depth := len(worker.taskChan)
+	for i := 0; i < globalScheduler.activeWorkers; i++ {
+		depth := len(globalScheduler.workers[i].taskChan)
 		if depth > max {
 			max = depth
 		}
@@ -330,8 +355,8 @@ func (s *UEScheduler) scaleWorkers(targetWorkers int, targetBufferSize int) erro
 	s.workerLock.Lock()
 	defer s.workerLock.Unlock()
 
-	currentWorkers := s.numWorkers
-	if targetWorkers == currentWorkers {
+	currentActive := s.activeWorkers
+	if targetWorkers == currentActive {
 		if targetBufferSize != s.taskBufferSize {
 			logger.NgapLog.Infof("Updating future worker buffer size from %d to %d", s.taskBufferSize, targetBufferSize)
 			s.taskBufferSize = targetBufferSize
@@ -339,29 +364,25 @@ func (s *UEScheduler) scaleWorkers(targetWorkers int, targetBufferSize int) erro
 		return nil
 	}
 
-	if targetWorkers > currentWorkers {
-		logger.NgapLog.Infof("Scaling NGAP workers up from %d to %d", currentWorkers, targetWorkers)
-		for i := currentWorkers; i < targetWorkers; i++ {
-			worker := NewWorker(i, targetBufferSize, s.handler, &s.wg)
-			s.workers = append(s.workers, worker)
+	if targetWorkers > currentActive {
+		logger.NgapLog.Infof("Scaling NGAP workers up from %d to %d", currentActive, targetWorkers)
+		for i := currentActive; i < targetWorkers; i++ {
+			s.workers[i].draining = false
 		}
-		s.numWorkers = targetWorkers
+		s.activeWorkers = targetWorkers
 		s.taskBufferSize = targetBufferSize
 		return nil
 	}
 
-	// Scale down: stop excess workers and remove them from the worker slice.
-	logger.NgapLog.Infof("Scaling NGAP workers down from %d to %d", currentWorkers, targetWorkers)
-	for i := currentWorkers - 1; i >= targetWorkers; i-- {
-		worker := s.workers[i]
-		worker.Stop()
-		s.workers = s.workers[:i]
+	// Scale down: set excess workers to draining
+	logger.NgapLog.Infof("Scaling NGAP workers down from %d to %d", currentActive, targetWorkers)
+	for i := targetWorkers; i < currentActive; i++ {
+		s.workers[i].draining = true
 	}
-	s.numWorkers = targetWorkers
+	s.activeWorkers = targetWorkers
 	if targetBufferSize != s.taskBufferSize {
 		logger.NgapLog.Infof("Updating future worker buffer size from %d to %d", s.taskBufferSize, targetBufferSize)
 		s.taskBufferSize = targetBufferSize
 	}
 	return nil
 }
-
