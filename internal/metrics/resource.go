@@ -11,24 +11,30 @@ const (
 
 const (
 	// NGAP Autoscaling Metrics
-	NGAP_MESSAGE_RATE_GAUGE_NAME        = "ngap_message_rate_per_sec"
-	NGAP_MESSAGE_RATE_GAUGE_DESC        = "Estimated NGAP message processing rate (messages/sec)"
-	NGAP_PREDICTED_LOAD_GAUGE_NAME      = "ngap_predicted_load_per_sec"
-	NGAP_PREDICTED_LOAD_GAUGE_DESC      = "Predicted NGAP load for next interval (messages/sec)"
-	NGAP_WORKER_COUNT_GAUGE_NAME        = "ngap_worker_count"
-	NGAP_WORKER_COUNT_GAUGE_DESC        = "Current number of active NGAP workers"
-	NGAP_TARGET_WORKER_COUNT_GAUGE_NAME = "ngap_target_worker_count"
-	NGAP_TARGET_WORKER_COUNT_GAUGE_DESC = "Target worker count based on prediction"
-	NGAP_AVG_QUEUE_DEPTH_GAUGE_NAME     = "ngap_avg_queue_depth"
-	NGAP_AVG_QUEUE_DEPTH_GAUGE_DESC     = "Average queue depth across NGAP workers"
-	NGAP_MAX_QUEUE_DEPTH_GAUGE_NAME     = "ngap_max_queue_depth"
-	NGAP_MAX_QUEUE_DEPTH_GAUGE_DESC     = "Maximum queue depth among NGAP workers"
-	NGAP_BUFFER_SIZE_GAUGE_NAME         = "ngap_buffer_size"
-	NGAP_BUFFER_SIZE_GAUGE_DESC         = "Task buffer size per worker"
-	NGAP_SCALE_EVENTS_COUNTER_NAME      = "ngap_scale_events_total"
-	NGAP_SCALE_EVENTS_COUNTER_DESC      = "Total number of scale-up and scale-down events"
-	NGAP_PREDICTION_ERROR_GAUGE_NAME    = "ngap_prediction_error_percent"
-	NGAP_PREDICTION_ERROR_GAUGE_DESC    = "Percentage error of load prediction vs actual (absolute)"
+	NGAP_MESSAGE_RATE_GAUGE_NAME         = "ngap_message_rate_per_sec"
+	NGAP_MESSAGE_RATE_GAUGE_DESC         = "Actual NGAP message processing rate (messages/sec)"
+	NGAP_PREDICTED_LOAD_GAUGE_NAME       = "ngap_predicted_load_per_sec"
+	NGAP_PREDICTED_LOAD_GAUGE_DESC       = "Predicted NGAP load for next interval (messages/sec)"
+	NGAP_WORKER_COUNT_GAUGE_NAME         = "ngap_worker_count"
+	NGAP_WORKER_COUNT_GAUGE_DESC         = "Current number of active NGAP workers"
+	NGAP_TARGET_WORKER_COUNT_GAUGE_NAME  = "ngap_target_worker_count"
+	NGAP_TARGET_WORKER_COUNT_GAUGE_DESC  = "Target worker count based on prediction"
+	NGAP_AVG_QUEUE_DEPTH_GAUGE_NAME      = "ngap_avg_queue_depth"
+	NGAP_AVG_QUEUE_DEPTH_GAUGE_DESC      = "Average queue depth across active NGAP workers"
+	NGAP_MAX_QUEUE_DEPTH_GAUGE_NAME      = "ngap_max_queue_depth"
+	NGAP_MAX_QUEUE_DEPTH_GAUGE_DESC      = "Maximum queue depth among active NGAP workers"
+	NGAP_DRAINING_QUEUE_DEPTH_GAUGE_NAME = "ngap_draining_queue_depth"
+	NGAP_DRAINING_QUEUE_DEPTH_GAUGE_DESC = "Total queue depth of draining workers during scale-down"
+	NGAP_BUFFER_SIZE_GAUGE_NAME          = "ngap_buffer_size"
+	NGAP_BUFFER_SIZE_GAUGE_DESC          = "Target task buffer size for new workers"
+	NGAP_SCALE_EVENTS_COUNTER_NAME       = "ngap_scale_events_total"
+	NGAP_SCALE_EVENTS_COUNTER_DESC       = "Total number of scale-up and scale-down events"
+	NGAP_PREDICTION_ERROR_GAUGE_NAME     = "ngap_prediction_error_percent"
+	NGAP_PREDICTION_ERROR_GAUGE_DESC     = "Percentage error of load prediction vs actual (absolute)"
+	NGAP_CPU_UTIL_GAUGE_NAME             = "ngap_cpu_utilization_percent"
+	NGAP_CPU_UTIL_GAUGE_DESC             = "Estimated CPU utilization from goroutine count"
+	NGAP_MEMORY_UTIL_GAUGE_NAME          = "ngap_memory_utilization_percent"
+	NGAP_MEMORY_UTIL_GAUGE_DESC          = "Heap memory utilization percentage"
 )
 
 const (
@@ -43,15 +49,18 @@ const (
 
 var (
 	// NGAP Autoscaling Metrics
-	ngapMessageRateGauge       prometheus.Gauge
-	ngapPredictedLoadGauge     prometheus.Gauge
-	ngapWorkerCountGauge       prometheus.Gauge
-	ngapTargetWorkerCountGauge prometheus.Gauge
-	ngapAvgQueueDepthGauge     prometheus.Gauge
-	ngapMaxQueueDepthGauge     prometheus.Gauge
-	ngapBufferSizeGauge        prometheus.Gauge
-	ngapScaleEventsCounter     *prometheus.CounterVec
-	ngapPredictionErrorGauge   prometheus.Gauge
+	ngapMessageRateGauge        prometheus.Gauge
+	ngapPredictedLoadGauge      prometheus.Gauge
+	ngapWorkerCountGauge        prometheus.Gauge
+	ngapTargetWorkerCountGauge  prometheus.Gauge
+	ngapAvgQueueDepthGauge      prometheus.Gauge
+	ngapMaxQueueDepthGauge      prometheus.Gauge
+	ngapDrainingQueueDepthGauge prometheus.Gauge
+	ngapBufferSizeGauge         prometheus.Gauge
+	ngapScaleEventsCounter      *prometheus.CounterVec
+	ngapPredictionErrorGauge    prometheus.Gauge
+	ngapCPUUtilGauge            prometheus.Gauge
+	ngapMemoryUtilGauge         prometheus.Gauge
 )
 
 func GetResourceMetrics(namespace string) []prometheus.Collector {
@@ -129,6 +138,18 @@ func GetResourceMetrics(namespace string) []prometheus.Collector {
 	ngapMaxQueueDepthGauge.Set(0)
 	collectors = append(collectors, ngapMaxQueueDepthGauge)
 
+	// Draining queue depth gauge
+	ngapDrainingQueueDepthGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: SUBSYSTEM_NAME_RESOURCE,
+			Name:      NGAP_DRAINING_QUEUE_DEPTH_GAUGE_NAME,
+			Help:      NGAP_DRAINING_QUEUE_DEPTH_GAUGE_DESC,
+		},
+	)
+	ngapDrainingQueueDepthGauge.Set(0)
+	collectors = append(collectors, ngapDrainingQueueDepthGauge)
+
 	// Buffer size gauge
 	ngapBufferSizeGauge = prometheus.NewGauge(
 		prometheus.GaugeOpts{
@@ -164,6 +185,30 @@ func GetResourceMetrics(namespace string) []prometheus.Collector {
 	)
 	ngapPredictionErrorGauge.Set(0)
 	collectors = append(collectors, ngapPredictionErrorGauge)
+
+	// CPU utilization gauge
+	ngapCPUUtilGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: SUBSYSTEM_NAME_RESOURCE,
+			Name:      NGAP_CPU_UTIL_GAUGE_NAME,
+			Help:      NGAP_CPU_UTIL_GAUGE_DESC,
+		},
+	)
+	ngapCPUUtilGauge.Set(0)
+	collectors = append(collectors, ngapCPUUtilGauge)
+
+	// Memory utilization gauge
+	ngapMemoryUtilGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: SUBSYSTEM_NAME_RESOURCE,
+			Name:      NGAP_MEMORY_UTIL_GAUGE_NAME,
+			Help:      NGAP_MEMORY_UTIL_GAUGE_DESC,
+		},
+	)
+	ngapMemoryUtilGauge.Set(0)
+	collectors = append(collectors, ngapMemoryUtilGauge)
 
 	return collectors
 }
@@ -223,5 +268,23 @@ func IncNgapScaleEvents(action, reason string) {
 func SetNgapPredictionError(errorPercent float64) {
 	if utils.IsBusinessMetricsEnabled() && ngapPredictionErrorGauge != nil {
 		ngapPredictionErrorGauge.Set(errorPercent)
+	}
+}
+
+func SetNgapDrainingQueueDepth(depth int) {
+	if utils.IsBusinessMetricsEnabled() && ngapDrainingQueueDepthGauge != nil {
+		ngapDrainingQueueDepthGauge.Set(float64(depth))
+	}
+}
+
+func SetNgapCPUUtilization(utilPercent float64) {
+	if utils.IsBusinessMetricsEnabled() && ngapCPUUtilGauge != nil {
+		ngapCPUUtilGauge.Set(utilPercent)
+	}
+}
+
+func SetNgapMemoryUtilization(utilPercent float64) {
+	if utils.IsBusinessMetricsEnabled() && ngapMemoryUtilGauge != nil {
+		ngapMemoryUtilGauge.Set(utilPercent)
 	}
 }

@@ -117,6 +117,7 @@ type UEScheduler struct {
 	handler        func(conn net.Conn, msg []byte)
 	workerLock     sync.RWMutex
 	wg             sync.WaitGroup
+	messageCounter uint64 // Total messages dispatched (for rate calculation)
 }
 
 // NewUEScheduler creates a new UE scheduler with the specified number of workers.
@@ -138,6 +139,7 @@ func NewUEScheduler(numWorkers int, taskBufferSize int, handler func(conn net.Co
 		activeWorkers:  numWorkers,
 		taskBufferSize: taskBufferSize,
 		handler:        handler,
+		messageCounter: 0,
 	}
 
 	for i := 0; i < maxWorkers; i++ {
@@ -165,6 +167,8 @@ func (s *UEScheduler) DispatchTask(task Task) bool {
 	logger.NgapLog.Debugf("Dispatching UE ID %d to Worker %d (hash-based routing)",
 		task.UEID, workerIndex)
 	if worker.Submit(task) {
+		// Increment message counter on successful dispatch
+		s.messageCounter++
 		return true
 	}
 
@@ -173,7 +177,12 @@ func (s *UEScheduler) DispatchTask(task Task) bool {
 	worker = s.workers[workerIndex]
 	logger.NgapLog.Debugf("Rerouting UE ID %d to active Worker %d",
 		task.UEID, workerIndex)
-	return worker.Submit(task)
+	if worker.Submit(task) {
+		// Increment message counter on successful dispatch
+		s.messageCounter++
+		return true
+	}
+	return false
 }
 
 // hashUEID computes a hash of the UE ID and maps it to a worker index.
@@ -271,7 +280,7 @@ func GetWorkerCount() int {
 	return globalScheduler.activeWorkers
 }
 
-// GetWorkerQueueDepths returns queue depth for each worker.
+// GetWorkerQueueDepths returns queue depth for each active worker only.
 func GetWorkerQueueDepths() map[int]int {
 	schedulerMutex.RLock()
 	defer schedulerMutex.RUnlock()
@@ -281,13 +290,15 @@ func GetWorkerQueueDepths() map[int]int {
 		return depths
 	}
 
-	for _, worker := range globalScheduler.workers {
-		depths[worker.ID] = len(worker.taskChan)
+	// Only include active workers for consistency with other metrics
+	for i := 0; i < globalScheduler.activeWorkers; i++ {
+		depths[globalScheduler.workers[i].ID] = len(globalScheduler.workers[i].taskChan)
 	}
 	return depths
 }
 
 // GetAverageQueueDepth returns the average queue depth across active workers.
+// Note: Draining workers are intentionally excluded from this calculation.
 func GetAverageQueueDepth() float64 {
 	schedulerMutex.RLock()
 	defer schedulerMutex.RUnlock()
@@ -304,6 +315,7 @@ func GetAverageQueueDepth() float64 {
 }
 
 // GetMaxQueueDepth returns the maximum queue depth among all active workers.
+// Note: Draining workers are intentionally excluded from this calculation.
 func GetMaxQueueDepth() int {
 	schedulerMutex.RLock()
 	defer schedulerMutex.RUnlock()
@@ -322,7 +334,38 @@ func GetMaxQueueDepth() int {
 	return max
 }
 
-// GetTaskBufferSize returns the current buffer size in use by the scheduler.
+// GetDrainingQueueDepth returns the total queue depth of all draining workers.
+// Use this to track tasks still being processed during scale-down.
+func GetDrainingQueueDepth() int {
+	schedulerMutex.RLock()
+	defer schedulerMutex.RUnlock()
+
+	if globalScheduler == nil || globalScheduler.activeWorkers >= len(globalScheduler.workers) {
+		return 0
+	}
+
+	total := 0
+	// Sum queue depth for all draining workers
+	for i := globalScheduler.activeWorkers; i < len(globalScheduler.workers); i++ {
+		total += len(globalScheduler.workers[i].taskChan)
+	}
+	return total
+}
+
+// GetMessageCount returns the total number of messages dispatched since startup.
+func GetMessageCount() uint64 {
+	schedulerMutex.RLock()
+	defer schedulerMutex.RUnlock()
+
+	if globalScheduler == nil {
+		return 0
+	}
+	return globalScheduler.messageCounter
+}
+
+// GetTaskBufferSize returns the target buffer size for future workers.
+// Note: This is the buffer size for NEW workers created after scaling.
+// Existing workers may have different buffer sizes assigned at creation.
 func GetTaskBufferSize() int {
 	schedulerMutex.RLock()
 	defer schedulerMutex.RUnlock()
@@ -365,7 +408,8 @@ func (s *UEScheduler) scaleWorkers(targetWorkers int, targetBufferSize int) erro
 	}
 
 	if targetWorkers > currentActive {
-		logger.NgapLog.Infof("Scaling NGAP workers up from %d to %d", currentActive, targetWorkers)
+		drainingQueueDepth := s.getDrainingQueueDepthUnsafe()
+		logger.NgapLog.Infof("Scaling NGAP workers up from %d to %d (draining_queue=%d)", currentActive, targetWorkers, drainingQueueDepth)
 		for i := currentActive; i < targetWorkers; i++ {
 			s.workers[i].draining = false
 		}
@@ -375,7 +419,8 @@ func (s *UEScheduler) scaleWorkers(targetWorkers int, targetBufferSize int) erro
 	}
 
 	// Scale down: set excess workers to draining
-	logger.NgapLog.Infof("Scaling NGAP workers down from %d to %d", currentActive, targetWorkers)
+	drainingQueueDepth := s.getDrainingQueueDepthUnsafe()
+	logger.NgapLog.Infof("Scaling NGAP workers down from %d to %d (existing_draining_queue=%d)", currentActive, targetWorkers, drainingQueueDepth)
 	for i := targetWorkers; i < currentActive; i++ {
 		s.workers[i].draining = true
 	}
@@ -385,4 +430,16 @@ func (s *UEScheduler) scaleWorkers(targetWorkers int, targetBufferSize int) erro
 		s.taskBufferSize = targetBufferSize
 	}
 	return nil
+}
+
+// getDrainingQueueDepthUnsafe computes draining queue depth without locking (caller must hold workerLock)
+func (s *UEScheduler) getDrainingQueueDepthUnsafe() int {
+	if s.activeWorkers >= len(s.workers) {
+		return 0
+	}
+	total := 0
+	for i := s.activeWorkers; i < len(s.workers); i++ {
+		total += len(s.workers[i].taskChan)
+	}
+	return total
 }

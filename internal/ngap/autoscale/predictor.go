@@ -8,22 +8,23 @@ import (
 
 // LoadSample represents a snapshot of NGAP metrics at a point in time.
 type LoadSample struct {
-	Timestamp      time.Time
-	MessageRate    float64 // messages per second
-	AvgQueueDepth  float64
-	MaxQueueDepth  int
-	WorkerCount    int
-	BufferSize     int
-	CPUUtilPercent float64
+	Timestamp         time.Time
+	MessageRate       float64 // messages per second
+	AvgQueueDepth     float64
+	MaxQueueDepth     int
+	WorkerCount       int
+	BufferSize        int
+	CPUUtilPercent    float64
+	MemoryUtilPercent float64
 }
 
 // Predictor forecasts future NGAP load based on recent samples.
 type Predictor struct {
-	mu              sync.RWMutex
-	samples         []LoadSample
-	maxSamples      int
-	ewmaAlpha       float64 // smoothing factor for EWMA (0.0 to 1.0)
-	ewmaRate        float64 // current EWMA estimate of message rate
+	mu                sync.RWMutex
+	samples           []LoadSample
+	maxSamples        int
+	ewmaAlpha         float64       // smoothing factor for EWMA (0.0 to 1.0)
+	ewmaRate          float64       // current EWMA estimate of message rate
 	predictionHorizon time.Duration // how far ahead to predict
 }
 
